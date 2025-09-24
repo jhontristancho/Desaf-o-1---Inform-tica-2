@@ -1,0 +1,31 @@
+# Build / IDE
+build*/
+**/build*/
+debug/
+release/
+*.o
+*.obj
+*.exe
+*.dll
+
+# Qt Creator / Qt
+*.pro.user
+*.pro.user.*
+*.qmake.stash
+*.user
+*.user.*
+.idea/
+.vscode/
+
+# Clangd / caches
+**/.qtc_clangd/
+**/.cache/
+**/.clangd/
+**/.ccls-cache/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Temporary / logs
+*.log

@@ -1,0 +1,8 @@
+# Normalizar finales de línea
+* text=auto
+
+# Forzar LF para el código fuente
+*.c text eol=lf
+*.cpp text eol=lf
+*.h text eol=lf
+*.hpp text eol=lf

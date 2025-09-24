@@ -1,0 +1,15 @@
+TEMPLATE = app
+CONFIG += console c++17
+CONFIG -= app_bundle
+CONFIG -= qt
+
+SOURCES += \
+<<<<<<< HEAD:Code/Lectura_archivostxt/Lectura_archivostxt.pro
+        desencriptacion.cpp \
+        main.cpp
+
+HEADERS += \
+    desencriptacion.h
+=======
+        Descomprimir.cpp
+>>>>>>> abae8f3 (Se acomodo todo la parte del main del proyecto y se creo gran parte del descomprimir):Code/Code_Desafio1/Descomprimir/Descomprimir.pro

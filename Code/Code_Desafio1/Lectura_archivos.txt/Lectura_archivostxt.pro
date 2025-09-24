@@ -4,8 +4,7 @@ CONFIG -= app_bundle
 CONFIG -= qt
 
 SOURCES += \
-        desencriptacion.cpp \
-        main.cpp
+    ../Descomprimir.cpp \
+    ../pruebamain.cpp \
+    lectoryalmacenatxt.cpp
 
-HEADERS += \
-    desencriptacion.h
