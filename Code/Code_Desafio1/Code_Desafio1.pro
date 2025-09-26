@@ -6,7 +6,10 @@ CONFIG -= qt
 SOURCES += $$PWD/Descomprimir/Descomprimir.cpp \
            $$PWD/Desencriptado/desencriptacion.cpp \
            $$PWD/Lectura_archivos.txt/lectoryalmacenatxt.cpp \
-           $$PWD/main.cpp
+           $$PWD/fuerzabruta/fuerzabruta.cpp \
+           $$PWD/comparacion_pista/comparador_pista.cpp\
+           $$PWD/main.cpp \
 
 
-HEADERS += $$PWD/Desencriptado/desencriptacion.h
+
+

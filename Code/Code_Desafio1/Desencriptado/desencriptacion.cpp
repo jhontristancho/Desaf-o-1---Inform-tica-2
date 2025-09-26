@@ -1,4 +1,3 @@
-#include "desencriptacion.h"
 #include <cstddef>
 
 //utiliza los mismos parametros que resive de el leer archivo mas la respectiva clave del xor
