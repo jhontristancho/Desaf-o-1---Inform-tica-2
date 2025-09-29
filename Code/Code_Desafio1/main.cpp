@@ -1,366 +1,391 @@
 // main.cpp
-// Lee EncriptadoX.txt (decodifica ZR->byte si aplica) y ejecuta fuerza bruta:
-// variantes: XOR->ROT, ROT->XOR, Solo XOR, Solo ROT
-// No escribe samples; imprime previews y escribe solo el Resultado final si encuentra la pista.
-//
-// Compilar (ejemplo):
-// g++ main.cpp desencriptacion.cpp Descomprimir.cpp -o brute_cases
-// (añade lectoryalmacenatxt.cpp si lo necesitas; el main hace su propia lectura/decodificación)
+// Fuerza bruta enfocada en Encriptado2 (valores del README aplicados).
+// Forzará: caso = 2, n = 3, K = 0x5A
+// Produce: salida.txt, previews_normales.txt, encontrados_snippet.txt
+// No usa std::string.
 
+#include <locale.h>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
+#include <cstdarg>
+#include <cstddef>
 #include <cctype>
+#include <cstdlib>
+#include <iostream>
+using std::cout;
+using std::cerr;
+using std::cin;
+using std::endl;
 
-// -------------------------
-// Declaraciones de tus funciones (ajusta si tus firmas son distintas)
-// -------------------------
+// ---------------------------------
+// Configuración (fijada para Encriptado2 del README)
+// ---------------------------------
+static bool DEBUG_USAR_SOLO_OBJETIVO = false; // probar sólo la combinación objetivo
+static const int DEBUG_OBJETIVO_N = 3;       // rotación indicada en README
+static const int DEBUG_OBJETIVO_K = 0x5A;   // clave indicada en README
+
+// además forzamos el caso objetivo (Encriptado2)
+static bool DEBUG_USAR_SOLO_CASO = false;
+static const int DEBUG_OBJETIVO_CASO = 2;
+// ---------------------------------
+
+// --- prototipos (implementados en tus .cpp) ---
+bool abrir_y_leer_en_bloques(const char *ruta,
+                             unsigned char ***bloques_out,
+                             size_t **tamanios_out,
+                             size_t &num_bloques_out,
+                             size_t &total_bytes_out);
+
+void liberar_bloques(unsigned char **bloques, size_t *tamanios, size_t num_bloques);
+
 unsigned char** desencriptar_xor(unsigned char **bloques, size_t *tamanios, size_t num_bloques, unsigned char clave);
 unsigned char** desencriptar_rotacion(unsigned char **bloques, size_t *tamanios, size_t num_bloques, int n);
 void liberar_bloques_desencriptados(unsigned char **bloques, size_t num_bloques);
 
-// Descompresión automática (RLE / LZ78) - rellena metodo_out con "RLE" / "LZ78" etc.
-// Devuelve puntero heap y longitud en salida_len.
-// NOTA: en este código se libera con free(salida). Si tu Descomprimir.cpp usa new[], cambia free por delete[].
-unsigned char* descomprimir_auto(unsigned char **bloques,
-                                 size_t *tamanios,
-                                 size_t num_bloques,
-                                 size_t &salida_len,
-                                 char metodo_out[16]);
+unsigned char* descomprimir_RLE(unsigned char **bloques, size_t *tamanios, size_t num_bloques, size_t &salida_len_out);
+unsigned char* descomprimir_LZ78(unsigned char **bloques, size_t *tamanios, size_t num_bloques, size_t &salida_len_out);
 
-// -------------------------
-// Helpers: decodificar ZR->bytes
-// -------------------------
-static void decodeZR_to_buffer(const unsigned char* inbuf, size_t inlen, unsigned char** outbuf, size_t* outlen) {
-    // input is bytes (text). We look for sequences 'Z' 'R' <c> and convert to <c>.
-    // If not matching, copy byte as-is.
-    unsigned char *tmp = (unsigned char*) malloc(inlen ? inlen : 1);
-    if (!tmp) { *outbuf = NULL; *outlen = 0; return; }
-    size_t p = 0;
-    size_t i = 0;
-    while (i < inlen) {
-        if (i + 2 < inlen && inbuf[i] == 'Z' && inbuf[i+1] == 'R') {
-            tmp[p++] = inbuf[i+2];
-            i += 3;
-        } else {
-            tmp[p++] = inbuf[i];
-            i += 1;
+// ------------------ logging global ------------------
+static FILE *g_log = nullptr;
+static FILE *g_previews = nullptr;
+static FILE *g_encontrados = nullptr;
+
+static void abrir_logs() {
+    g_log = fopen("salida.txt", "wb");
+    g_previews = fopen("previews_normales.txt", "a");
+    g_encontrados = fopen("encontrados_snippet.txt", "a");
+}
+
+static void cerrar_logs() {
+    if (g_log) { fclose(g_log); g_log = nullptr; }
+    if (g_previews) { fclose(g_previews); g_previews = nullptr; }
+    if (g_encontrados) { fclose(g_encontrados); g_encontrados = nullptr; }
+}
+
+static void log_printf(const char *fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    vprintf(fmt, ap);
+    va_end(ap);
+
+    if (g_log) {
+        va_list ap2;
+        va_start(ap2, fmt);
+        vfprintf(g_log, fmt, ap2);
+        va_end(ap2);
+        fflush(g_log);
+    }
+}
+
+static bool guardar_binario(const char *ruta, const unsigned char *buf, size_t len) {
+    FILE *f = fopen(ruta, "wb");
+    if (!f) return false;
+    size_t w = fwrite(buf, 1, len, f);
+    fclose(f);
+    return (w == len);
+}
+
+static void append_preview_text(const char *label, const unsigned char *buf, size_t len) {
+    if (g_previews) {
+        fprintf(g_previews, "%s\n", label);
+        for (size_t i = 0; i < len; ++i) {
+            unsigned char c = buf[i];
+            if (isprint(c)) fputc((char)c, g_previews);
+            else fprintf(g_previews, "\\x%02X", (unsigned int)c);
+        }
+        fputc('\n', g_previews);
+        fflush(g_previews);
+    }
+    if (g_log) {
+        fprintf(g_log, "%s\n", label);
+        for (size_t i = 0; i < len; ++i) {
+            unsigned char c = buf[i];
+            if (isprint(c)) fputc((char)c, g_log);
+            else fprintf(g_log, "\\x%02X", (unsigned int)c);
+        }
+        fputc('\n', g_log);
+        fflush(g_log);
+    }
+}
+
+static void append_encontrado(const char *msg) {
+    if (g_encontrados) {
+        fprintf(g_encontrados, "%s\n", msg);
+        fflush(g_encontrados);
+    }
+    if (g_log) {
+        fprintf(g_log, "%s\n", msg);
+        fflush(g_log);
+    }
+}
+
+// ------------------ previews ------------------
+static void print_hex_preview_from_blocks_with_index(unsigned char **bloques, size_t *tamanios, size_t num_bloques, size_t max_bytes) {
+    size_t printed = 0;
+    size_t idx = 0, off = 0;
+    size_t count_since_label = 0;
+    while (idx < num_bloques && printed < max_bytes) {
+        if (off >= tamanios[idx]) { ++idx; off = 0; continue; }
+        if (count_since_label == 0) log_printf("[%zu:%zu] ", idx, off);
+        unsigned char b = bloques[idx][off++];
+        log_printf("%02X ", (unsigned int)b);
+        ++printed;
+        ++count_since_label;
+        if (count_since_label >= 8) {
+            count_since_label = 0;
+            log_printf("  ");
         }
     }
-    // shrink
-    unsigned char *out = (unsigned char*) realloc(tmp, p ? p : 1);
-    if (out) {
-        *outbuf = out;
-    } else {
-        *outbuf = tmp;
-    }
-    *outlen = p;
+    if (printed == 0) log_printf("(vacio)");
+    log_printf("\n");
 }
 
-// -------------------------
-// Comparación binary-safe
-// -------------------------
-static bool contains_sub(const unsigned char* buf, size_t buf_len, const unsigned char* pat, size_t pat_len) {
-    if (!buf || !pat) return false;
-    if (pat_len == 0) return true;
-    if (buf_len < pat_len) return false;
-    for (size_t i = 0; i + pat_len <= buf_len; ++i) {
-        size_t j = 0;
-        for (; j < pat_len; ++j) if (buf[i+j] != pat[j]) break;
-        if (j == pat_len) return true;
-    }
-    return false;
-}
-
-// Normalize helpers (heap copies; caller frees)
-static unsigned char* to_lower_copy(const unsigned char* buf, size_t len) {
-    unsigned char* out = (unsigned char*) malloc(len ? len : 1);
-    if (!out) return NULL;
-    for (size_t i=0;i<len;++i) out[i] = (unsigned char) tolower(buf[i]);
-    return out;
-}
-static unsigned char* strip_newlines_copy(const unsigned char* buf, size_t len, size_t* out_len) {
-    unsigned char* tmp = (unsigned char*) malloc(len ? len : 1);
-    if (!tmp) { *out_len = 0; return NULL; }
-    size_t p = 0;
-    for (size_t i=0;i<len;++i) {
-        if (buf[i] == '\n' || buf[i] == '\r') continue;
-        tmp[p++] = buf[i];
-    }
-    *out_len = p;
-    unsigned char* out = (unsigned char*) realloc(tmp, p ? p : 1);
-    if (out) return out;
-    return tmp;
-}
-static unsigned char* strip_spaces_copy(const unsigned char* buf, size_t len, size_t* out_len) {
-    unsigned char* tmp = (unsigned char*) malloc(len ? len : 1);
-    if (!tmp) { *out_len = 0; return NULL; }
-    size_t p = 0;
-    bool last_space = false;
-    for (size_t i=0;i<len;++i) {
+static void print_text_preview_to_logs(const unsigned char *buf, size_t len, size_t max_chars) {
+    size_t show = (len < max_chars) ? len : max_chars;
+    if (show == 0) { log_printf("(vacio)\n"); return; }
+    for (size_t i = 0; i < show; ++i) {
         unsigned char c = buf[i];
-        if (c==' '||c=='\t'||c=='\r'||c=='\n') {
-            if (!last_space) { tmp[p++] = ' '; last_space = true; }
-        } else {
-            tmp[p++] = c; last_space = false;
+        if (isprint(c)) log_printf("%c", (char)c);
+        else log_printf("\\x%02X", (unsigned int)c);
+    }
+    if (len > show) log_printf("... (%zu bytes más)", len - show);
+    log_printf("\n");
+}
+
+// ------------------ util ------------------
+static unsigned char* concatenar_bloques(unsigned char **bloques, size_t *tamanios, size_t num_bloques, size_t &out_len) {
+    out_len = 0;
+    for (size_t i = 0; i < num_bloques; ++i) out_len += tamanios[i];
+    if (out_len == 0) return nullptr;
+    unsigned char *buf = new (std::nothrow) unsigned char[out_len];
+    if (!buf) return nullptr;
+    size_t pos = 0;
+    for (size_t i = 0; i < num_bloques; ++i) {
+        for (size_t j = 0; j < tamanios[i]; ++j) buf[pos++] = bloques[i][j];
+    }
+    return buf;
+}
+
+static long buscar_subsec(const unsigned char *hay, size_t hlen, const unsigned char *needle, size_t nlen) {
+    if (!hay || !needle || nlen == 0 || hlen < nlen) return -1;
+    for (size_t i = 0; i + nlen <= hlen; ++i) {
+        bool match = true;
+        for (size_t j = 0; j < nlen; ++j) {
+            if (hay[i + j] != needle[j]) { match = false; break; }
         }
+        if (match) return (long)i;
     }
-    // trim
-    size_t start = 0; while (start < p && tmp[start]==' ') start++;
-    size_t end = p; while (end > start && tmp[end-1]==' ') end--;
-    size_t outp = (end>start) ? (end-start) : 0;
-    unsigned char* out = (unsigned char*) malloc(outp ? outp : 1);
-    if (!out) { free(tmp); *out_len = 0; return NULL; }
-    if (outp) memcpy(out, tmp + start, outp);
-    free(tmp);
-    *out_len = outp;
+    return -1;
+}
+
+// Extraer ASCII (normalizar) de buffer con padding
+static unsigned char* extraer_ascii(const unsigned char *buf, size_t len, size_t &out_len) {
+    if (!buf || len < 3) { out_len = 0; return nullptr; }
+    out_len = len / 3;
+    unsigned char *out = new unsigned char[out_len];
+    size_t j = 0;
+    for (size_t i = 2; i < len; i += 3) {
+        out[j++] = buf[i];
+        if (j >= out_len) break;
+    }
     return out;
 }
 
-// preview printing
-static void print_preview(const unsigned char* buf, size_t len) {
-    size_t dump = len < 160 ? len : 160;
-    for (size_t i=0;i<dump;++i) {
-        unsigned char c = buf[i];
-        if (c >= 32 && c <= 126) putchar(c);
-        else printf("\\x%02X", c);
-    }
-    if (len > dump) printf("...");
-    printf("\n");
-}
-
-// -------------------------
-// Main brute force loop (integrado en main para simplicidad)
-// -------------------------
+// ------------------ main ------------------
 int main() {
-    printf("¿Cuántos casos quieres procesar? (ej: 1): ");
-    int ncases = 0;
-    if (scanf("%d", &ncases) != 1 || ncases <= 0) {
-        fprintf(stderr, "Número inválido.\n");
+    setlocale(LC_ALL, "");
+    abrir_logs();
+    log_printf("=== Fuerza bruta (RLE/LZ78) integracion - DEBUG (Encriptado2 target) ===\n");
+    log_printf("Forzando: caso=%d, n=%d, K=0x%02X\n", DEBUG_OBJETIVO_CASO, DEBUG_OBJETIVO_N, DEBUG_OBJETIVO_K);
+
+    log_printf("Ingrese la cantidad de casos a evaluar (n): ");
+
+    int casos = 0;
+    if (!(cin >> casos) || casos <= 0) {
+        cerr << "Entrada invalida\n";
+        cerrar_logs();
         return 1;
     }
+    log_printf("%d\n", casos);
 
-    // consumir newline
-    int ch = getchar();
-    (void)ch;
+    for (int caso = 1; caso <= casos; ++caso) {
+        // si activaste forzar SOLO CASO, saltamos los demás
+        if (DEBUG_USAR_SOLO_CASO && caso != DEBUG_OBJETIVO_CASO) continue;
 
-    for (int caso = 1; caso <= ncases; ++caso) {
-        printf("\n=== Caso %d ===\n", caso);
-        char fname[256];
-        snprintf(fname, sizeof(fname), "Encriptado%d.txt", caso);
+        char encriptado_path[128];
+        char pista_path_try1[128];
+        char pista_path_try2[128];
+        snprintf(encriptado_path, sizeof(encriptado_path), "Encriptado%d.txt", caso);
+        snprintf(pista_path_try1, sizeof(pista_path_try1), "pista%d.txt", caso);
+        snprintf(pista_path_try2, sizeof(pista_path_try2), "pista%d", caso);
 
-        // read file as binary text
-        FILE *fi = fopen(fname, "rb");
-        if (!fi) {
-            // try without .txt
-            snprintf(fname, sizeof(fname), "Encriptado%d", caso);
-            fi = fopen(fname, "rb");
-            if (!fi) {
-                fprintf(stderr, "No se encontró %s ni Encriptado%d\n", fname, caso);
-                continue;
-            }
-        }
-        fseek(fi, 0, SEEK_END);
-        long flen = ftell(fi);
-        fseek(fi, 0, SEEK_SET);
-        unsigned char *raw = (unsigned char*) malloc(flen > 0 ? flen : 1);
-        if (!raw) { fclose(fi); fprintf(stderr,"Memoria insuficiente\n"); continue; }
-        size_t got = fread(raw, 1, flen > 0 ? flen : 0, fi);
-        fclose(fi);
+        log_printf("\n--- Caso %d ---\n", caso);
 
-        // decode ZR -> bytes
-        unsigned char *decoded = NULL;
-        size_t decoded_len = 0;
-        decodeZR_to_buffer(raw, got, &decoded, &decoded_len);
-        free(raw);
-
-        if (!decoded || decoded_len == 0) {
-            fprintf(stderr, "Decodificación vacía para %s\n", fname);
-            if (decoded) free(decoded);
+        unsigned char **enc_bloques = nullptr;
+        size_t *enc_tamanios = nullptr;
+        size_t enc_num = 0, enc_total = 0;
+        if (!abrir_y_leer_en_bloques(encriptado_path, &enc_bloques, &enc_tamanios, enc_num, enc_total)) {
+            log_printf("No se pudo abrir %s\n", encriptado_path);
             continue;
         }
+        log_printf("Leidos %zu bytes en %zu bloques\n", enc_total, enc_num);
 
-        // Construimos arrays de bloques (1 bloque)
-        unsigned char **bloques = (unsigned char**) malloc(sizeof(unsigned char*));
-        size_t *tamanios = (size_t*) malloc(sizeof(size_t));
-        bloques[0] = decoded;
-        tamanios[0] = decoded_len;
-        size_t num_bloques = 1;
+        // leer pista
+        unsigned char **p_bloques = nullptr;
+        size_t *p_tamanios = nullptr;
+        size_t p_num = 0, p_total = 0;
+        bool pista_ok = false;
+        if (abrir_y_leer_en_bloques(pista_path_try1, &p_bloques, &p_tamanios, p_num, p_total)) pista_ok = true;
+        else if (abrir_y_leer_en_bloques(pista_path_try2, &p_bloques, &p_tamanios, p_num, p_total)) pista_ok = true;
 
-        // Leer pista desde pistaX.txt
-        char pfname[256];
-        snprintf(pfname, sizeof(pfname), "pista%d.txt", caso);
-        FILE *pf = fopen(pfname, "rb");
-        if (!pf) {
-            snprintf(pfname, sizeof(pfname), "pista%d", caso);
-            pf = fopen(pfname, "rb");
-            if (!pf) {
-                fprintf(stderr, "No se pudo abrir la pista %s ni pista%d\n", pfname, caso);
-                // liberar bloques
-                free(bloques); free(tamanios); free(decoded);
-                continue;
-            }
+        if (!pista_ok) {
+            log_printf("No se encontro archivo de pista (pista%d[.txt])\n", caso);
+            liberar_bloques(enc_bloques, enc_tamanios, enc_num);
+            continue;
         }
-        fseek(pf, 0, SEEK_END);
-        long plen = ftell(pf);
-        fseek(pf, 0, SEEK_SET);
-        unsigned char *pbuf = (unsigned char*) malloc(plen > 0 ? plen : 1);
-        size_t pgot = fread(pbuf, 1, plen > 0 ? plen : 0, pf);
-        fclose(pf);
-        size_t p_len = pgot;
+        log_printf("Pista leida: %zu bytes\n", p_total);
 
-        // Normalize pista: remove trailing newline (common)
-        while (p_len > 0 && (pbuf[p_len-1] == '\n' || pbuf[p_len-1] == '\r')) p_len--;
+        size_t pista_len = 0;
+        unsigned char *pista_buf = concatenar_bloques(p_bloques, p_tamanios, p_num, pista_len);
+        log_printf("Preview pista (hasta 200 chars):\n");
+        print_text_preview_to_logs(pista_buf, pista_len, 200);
 
-        // Fuerza bruta: variantes 0..3
         bool encontrado = false;
-        int intentos = 0;
 
-        for (int variante = 0; variante < 4 && !encontrado; ++variante) {
-            // variante 0: XOR->ROT
-            // variante 1: ROT->XOR
-            // variante 2: Solo XOR
-            // variante 3: Solo ROT
-            for (int n = 0; n <= 7 && !encontrado; ++n) {
-                for (int K = 0; K <= 255 && !encontrado; ++K) {
-                    ++intentos;
-                    if ((intentos & 0x3FF) == 0) {
-                        printf("Progreso: var=%d n=%d K=%d (intentos=%d)\n", variante, n, K, intentos);
+        // Si DEBUG_USAR_SOLO_OBJETIVO -> probamos solo la combinacion objetivo
+        for (int n = 1; n <= 7 && !encontrado; ++n) {
+            for (int K = 0; K <= 255 && !encontrado; ++K) {
+                if (DEBUG_USAR_SOLO_OBJETIVO) {
+                    if (!(n == DEBUG_OBJETIVO_N && K == DEBUG_OBJETIVO_K)) continue;
+                }
+
+                unsigned char clave = (unsigned char)K;
+                unsigned char **xor_bloques = desencriptar_xor(enc_bloques, enc_tamanios, enc_num, clave);
+                if (!xor_bloques) continue;
+
+                log_printf("\n[n=%d K=0x%02X] Después de XOR (primeros 64 bytes, hex con índice):\n", n, K);
+                print_hex_preview_from_blocks_with_index(xor_bloques, enc_tamanios, enc_num, 64);
+
+                unsigned char **rot_bloques = desencriptar_rotacion(xor_bloques, enc_tamanios, enc_num, n);
+                if (!rot_bloques) {
+                    liberar_bloques_desencriptados(xor_bloques, enc_num);
+                    continue;
+                }
+
+                size_t rot_len = 0;
+                unsigned char *rot_concat = concatenar_bloques(rot_bloques, enc_tamanios, enc_num, rot_len);
+                if (!rot_concat) {
+                    liberar_bloques_desencriptados(xor_bloques, enc_num);
+                    liberar_bloques_desencriptados(rot_bloques, enc_num);
+                    continue;
+                }
+
+                // guardar binario rotado (último)
+                guardar_binario("debug_rot_last.bin", rot_concat, rot_len);
+
+                // normalizar a ascii
+                size_t norm_len = 0;
+                unsigned char *norm_buf = extraer_ascii(rot_concat, rot_len, norm_len);
+
+                // guardar norm_buf en archivo legible por intento
+                if (norm_buf && norm_len > 0) {
+                    char fname_norm[128];
+                    snprintf(fname_norm, sizeof(fname_norm), "debug_norm_caso%d_n%d_K%02X.txt", caso, n, K);
+                    FILE *fn = fopen(fname_norm, "wb");
+                    if (fn) {
+                        fwrite(norm_buf, 1, norm_len, fn);
+                        fclose(fn);
                     }
+                }
 
-                    unsigned char **s1 = NULL;
-                    unsigned char **s2 = NULL;
+                delete[] rot_concat;
 
-                    if (variante == 0) {
-                        s1 = desencriptar_xor(bloques, tamanios, num_bloques, (unsigned char)K);
-                        if (!s1) continue;
-                        s2 = desencriptar_rotacion(s1, tamanios, num_bloques, n);
-                        liberar_bloques_desencriptados(s1, num_bloques);
-                        if (!s2) continue;
-                    } else if (variante == 1) {
-                        s1 = desencriptar_rotacion(bloques, tamanios, num_bloques, n);
-                        if (!s1) continue;
-                        s2 = desencriptar_xor(s1, tamanios, num_bloques, (unsigned char)K);
-                        liberar_bloques_desencriptados(s1, num_bloques);
-                        if (!s2) continue;
-                    } else if (variante == 2) {
-                        s2 = desencriptar_xor(bloques, tamanios, num_bloques, (unsigned char)K);
-                        if (!s2) continue;
+                if (norm_buf && norm_len > 0) {
+                    log_printf("[n=%d K=0x%02X] Preview normalizado:\n", n, K);
+                    print_text_preview_to_logs(norm_buf, norm_len, 400);
+
+                    // añadir a previews_normales.txt
+                    char label[128];
+                    snprintf(label, sizeof(label), "--- Caso %d n=%d K=0x%02X Preview normalizado ---", caso, n, K);
+                    append_preview_text(label, norm_buf, norm_len);
+
+                    // preparar 1-bloque para descompresores
+                    unsigned char *bloques_tmp[1];
+                    size_t tamanios_tmp[1];
+                    bloques_tmp[0] = norm_buf;
+                    tamanios_tmp[0] = norm_len;
+
+                    // RLE (aunque README dice LZ78, probamos ambos)
+                    size_t out_len_rle = 0;
+                    unsigned char *rle_out = descomprimir_RLE(bloques_tmp, tamanios_tmp, 1, out_len_rle);
+                    if (rle_out) {
+                        log_printf("[n=%d K=0x%02X] Resultado intento RLE: %zu bytes. Preview (texto):\n", n, K, out_len_rle);
+                        print_text_preview_to_logs(rle_out, out_len_rle, 400);
+
+                        long pos = buscar_subsec(rle_out, out_len_rle, pista_buf, pista_len);
+                        if (pos >= 0) {
+                            char msg[256];
+                            snprintf(msg, sizeof(msg), ">>> ENCONTRADO (RLE): caso=%d n=%d K=0x%02X posicion=%ld", caso, n, K, pos);
+                            log_printf("%s\n", msg);
+                            append_encontrado(msg);
+                            char outpath[128];
+                            snprintf(outpath, sizeof(outpath), "resultado_caso%d_RLE_n%d_K%02X.txt", caso, n, K);
+                            FILE *f = fopen(outpath, "wb");
+                            if (f) { fwrite(rle_out, 1, out_len_rle, f); fclose(f); log_printf("Escrito: %s\n", outpath); }
+                            encontrado = true;
+                        }
+                        delete[] rle_out;
                     } else {
-                        s2 = desencriptar_rotacion(bloques, tamanios, num_bloques, n);
-                        if (!s2) continue;
+                        log_printf("[n=%d K=0x%02X] RLE -> no parseable o resultó vacío\n", n, K);
                     }
 
-                    // intentar descomprimir
-                    size_t salida_len = 0;
-                    char metodo_out[16] = {0};
-                    unsigned char *salida = descomprimir_auto(s2, tamanios, num_bloques, salida_len, metodo_out);
+                    // LZ78
+                    if (!encontrado) {
+                        size_t out_len_lz = 0;
+                        unsigned char *lz_out = descomprimir_LZ78(bloques_tmp, tamanios_tmp, 1, out_len_lz);
+                        if (lz_out) {
+                            log_printf("[n=%d K=0x%02X] Resultado intento LZ78: %zu bytes. Preview (texto):\n", n, K, out_len_lz);
+                            print_text_preview_to_logs(lz_out, out_len_lz, 400);
 
-                    liberar_bloques_desencriptados(s2, num_bloques);
-
-                    if (!salida || salida_len == 0) {
-                        if (salida) free(salida);
-                        continue;
-                    }
-
-                    // Print preview
-                    const char *varstr = (variante==0)?"XOR->ROT":(variante==1)?"ROT->XOR":(variante==2)?"Solo XOR":"Solo ROT";
-                    printf("var=%s n=%d K=%d metodo=%s preview: ", varstr, n, K, metodo_out);
-                    print_preview(salida, salida_len);
-
-                    // Comparaciones: exacta
-                    if (contains_sub(salida, salida_len, pbuf, p_len)) {
-                        // guardar resultado final
-                        char outname[256];
-                        snprintf(outname, sizeof(outname), "Resultado_Caso%d_%s_n%d_K%02X_%s.txt",
-                                 caso, varstr, n, K, metodo_out);
-                        FILE *fo = fopen(outname, "wb");
-                        if (fo) { fwrite(salida,1,salida_len,fo); fclose(fo); }
-                        printf("[ENCONTRADO exact] Caso %d -> %s n=%d K=0x%02X Metodo=%s Archivo=%s\n",
-                               caso, varstr, n, K, metodo_out, outname);
-                        encontrado = true;
-                    }
-                    if (encontrado) { free(salida); break; }
-
-                    // lowercase
-                    unsigned char *s_low = to_lower_copy(salida, salida_len);
-                    unsigned char *p_low = to_lower_copy(pbuf, p_len);
-                    if (s_low && p_low) {
-                        if (contains_sub(s_low, salida_len, p_low, p_len)) {
-                            char outname[256];
-                            snprintf(outname, sizeof(outname), "Resultado_Caso%d_%s_n%d_K%02X_%s_lower.txt",
-                                     caso, varstr, n, K, metodo_out);
-                            FILE *fo = fopen(outname, "wb");
-                            if (fo) { fwrite(salida,1,salida_len,fo); fclose(fo); }
-                            printf("[ENCONTRADO lower] Caso %d -> %s n=%d K=0x%02X Metodo=%s Archivo=%s\n",
-                                   caso, varstr, n, K, metodo_out, outname);
-                            encontrado = true;
+                            long pos2 = buscar_subsec(lz_out, out_len_lz, pista_buf, pista_len);
+                            if (pos2 >= 0) {
+                                char msg2[256];
+                                snprintf(msg2, sizeof(msg2), ">>> ENCONTRADO (LZ78): caso=%d n=%d K=0x%02X posicion=%ld", caso, n, K, pos2);
+                                log_printf("%s\n", msg2);
+                                append_encontrado(msg2);
+                                char outpath2[128];
+                                snprintf(outpath2, sizeof(outpath2), "resultado_caso%d_LZ78_n%d_K%02X.txt", caso, n, K);
+                                FILE *f2 = fopen(outpath2, "wb");
+                                if (f2) { fwrite(lz_out, 1, out_len_lz, f2); fclose(f2); log_printf("Escrito: %s\n", outpath2); }
+                                encontrado = true;
+                            }
+                            delete[] lz_out;
+                        } else {
+                            log_printf("[n=%d K=0x%02X] LZ78 -> no parseable o resultó vacío\n", n, K);
                         }
                     }
-                    if (s_low) free(s_low);
-                    if (p_low) free(p_low);
-                    if (encontrado) { free(salida); break; }
 
-                    // strip newlines
-                    size_t s_sn_len=0, p_sn_len=0;
-                    unsigned char *s_sn = strip_newlines_copy(salida, salida_len, &s_sn_len);
-                    unsigned char *p_sn = strip_newlines_copy(pbuf, p_len, &p_sn_len);
-                    if (s_sn && p_sn) {
-                        if (contains_sub(s_sn, s_sn_len, p_sn, p_sn_len)) {
-                            char outname[256];
-                            snprintf(outname, sizeof(outname), "Resultado_Caso%d_%s_n%d_K%02X_%s_stripNL.txt",
-                                     caso, varstr, n, K, metodo_out);
-                            FILE *fo = fopen(outname, "wb");
-                            if (fo) { fwrite(salida,1,salida_len,fo); fclose(fo); }
-                            printf("[ENCONTRADO stripNL] Caso %d -> %s n=%d K=0x%02X Metodo=%s Archivo=%s\n",
-                                   caso, varstr, n, K, metodo_out, outname);
-                            encontrado = true;
-                        }
-                    }
-                    if (s_sn) free(s_sn);
-                    if (p_sn) free(p_sn);
-                    if (encontrado) { free(salida); break; }
+                    delete[] norm_buf;
+                } else {
+                    log_printf("[n=%d K=0x%02X] Normalización produjo buffer vacío\n", n, K);
+                    if (norm_buf) delete[] norm_buf;
+                }
 
-                    // strip & collapse spaces
-                    size_t s_sp_len=0, p_sp_len=0;
-                    unsigned char *s_sp = strip_spaces_copy(salida, salida_len, &s_sp_len);
-                    unsigned char *p_sp = strip_spaces_copy(pbuf, p_len, &p_sp_len);
-                    if (s_sp && p_sp) {
-                        if (contains_sub(s_sp, s_sp_len, p_sp, p_sp_len)) {
-                            char outname[256];
-                            snprintf(outname, sizeof(outname), "Resultado_Caso%d_%s_n%d_K%02X_%s_stripSpace.txt",
-                                     caso, varstr, n, K, metodo_out);
-                            FILE *fo = fopen(outname, "wb");
-                            if (fo) { fwrite(salida,1,salida_len,fo); fclose(fo); }
-                            printf("[ENCONTRADO stripSpace] Caso %d -> %s n=%d K=0x%02X Metodo=%s Archivo=%s\n",
-                                   caso, varstr, n, K, metodo_out, outname);
-                            encontrado = true;
-                        }
-                    }
-                    if (s_sp) free(s_sp);
-                    if (p_sp) free(p_sp);
-                    if (encontrado) { free(salida); break; }
+                liberar_bloques_desencriptados(xor_bloques, enc_num);
+                liberar_bloques_desencriptados(rot_bloques, enc_num);
 
-                    // no match: liberar salida
-                    free(salida);
-                } // for K
-            } // for n
-        } // for variante
+            } // K
+        } // n
 
-        // liberar estructuras locales
-        free(bloques);
-        free(tamanios);
-        free(decoded);
-        free(pbuf);
+        if (!encontrado) log_printf("No se encontro la pista en este caso\n");
 
-        if (!encontrado) {
-            printf("No se encontró la pista para el caso %d.\n", caso);
-        } else {
-            printf("Pista encontrada para el caso %d (ver archivo Resultado_Caso...)\n", caso);
-        }
-    } // for casos
+        // limpieza caso
+        delete[] pista_buf;
+        liberar_bloques(enc_bloques, enc_tamanios, enc_num);
+        liberar_bloques(p_bloques, p_tamanios, p_num);
+    } // caso
 
-    printf("\nProceso finalizado.\n");
+    log_printf("\nFin del proceso.\n");
+    cerrar_logs();
     return 0;
 }
 

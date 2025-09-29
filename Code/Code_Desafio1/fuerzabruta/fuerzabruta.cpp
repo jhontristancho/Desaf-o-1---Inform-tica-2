@@ -1,240 +1,288 @@
-// fuerza_bruta.cpp  (VERSIÓN: SOLO XOR, listado de claves imprimibles)
-// - Prueba claves K = 0..255 aplicando solo desencriptar_xor
-// - Llama a descomprimir_auto sobre el resultado
-// - Imprime por consola las claves que generan salida "parcialmente imprimible"
-// - Compara con la pista en varias normalizaciones y guarda Resultado_Caso... si hay match
-// - Libera los bloques originales al final (contrato). No crea archivos intermedios.
-//
-// Compilar junto a tus otros .cpp:
-// g++ main.cpp fuerza_bruta.cpp comparacion.cpp lectoryalmacenatxt.cpp desencriptacion.cpp Descomprimir.cpp -o brute_cases
-
-#include <cstdio>
-#include <cstdlib>
+#include <iostream>
 #include <cstring>
-#include <cctype>
+#include <cstddef>
 
-// ---------- Firmas externas (ajusta si tus funciones tienen otros nombres) ----------
-unsigned char** desencriptar_xor(unsigned char **bloques, size_t *tamanios, size_t num_bloques, unsigned char clave);
-void liberar_bloques_desencriptados(unsigned char **bloques, size_t num_bloques);
-unsigned char* descomprimir_auto(unsigned char **bloques,
-                                 size_t *tamanios,
-                                 size_t num_bloques,
-                                 size_t &salida_len,
-                                 char metodo_out[16]);
-void liberar_bloques(unsigned char **bloques, size_t *tamanios, size_t num_bloques);
+// Declaraciones de funciones externas
+extern unsigned char* descomprimir_RLE(unsigned char **bloques, size_t *tamanios, size_t num_bloques, size_t &salida_len_out);
+extern unsigned char* descomprimir_LZ78(unsigned char **bloques, size_t *tamanios, size_t num_bloques, size_t &salida_len_out);
+extern bool abrir_y_leer_en_bloques(const char *ruta, unsigned char ***bloques_out, size_t **tamanios_out, size_t &num_bloques_out, size_t &total_bytes_out);
+extern void liberar_bloques(unsigned char **bloques, size_t *tamanios, size_t num_bloques);
+extern unsigned char** desencriptar_xor(unsigned char **bloques, size_t *tamanios, size_t num_bloques, unsigned char clave);
+extern unsigned char** desencriptar_rotacion(unsigned char **bloques, size_t *tamanios, size_t num_bloques, int n);
+extern void liberar_bloques_desencriptados(unsigned char **bloques, size_t num_bloques);
 
-// -----------------------------------------------------------------------------
-// Helpers locales (no colisionan con comparacion.cpp)
-// -----------------------------------------------------------------------------
-static bool contains_sub_local(const unsigned char* buf, size_t buf_len, const unsigned char* pat, size_t pat_len) {
-    if (!buf || !pat) return false;
-    if (pat_len == 0) return true;
-    if (buf_len < pat_len) return false;
-    for (size_t i = 0; i + pat_len <= buf_len; ++i) {
-        size_t j = 0;
-        for (; j < pat_len; ++j) if (buf[i+j] != pat[j]) break;
-        if (j == pat_len) return true;
+// Función para comparar si un buffer contiene una pista específica
+static bool contiene_pista(const unsigned char *buffer, size_t buffer_len,
+                           const unsigned char *pista, size_t pista_len) {
+    if (!buffer || !pista || pista_len == 0) return false;
+    if (buffer_len < pista_len) return false;
+
+    for (size_t i = 0; i <= buffer_len - pista_len; i++) {
+        bool coincide = true;
+        for (size_t j = 0; j < pista_len; j++) {
+            if (buffer[i + j] != pista[j]) {
+                coincide = false;
+                break;
+            }
+        }
+        if (coincide) return true;
     }
     return false;
 }
 
-static unsigned char* to_lower_copy_local(const unsigned char* buf, size_t len) {
-    unsigned char* out = (unsigned char*) malloc(len ? len : 1);
-    if (!out) return NULL;
-    for (size_t i = 0; i < len; ++i) out[i] = (unsigned char) tolower(buf[i]);
-    return out;
-}
-static unsigned char* strip_newlines_copy_local(const unsigned char* buf, size_t len, size_t* out_len) {
-    unsigned char* tmp = (unsigned char*) malloc(len ? len : 1);
-    if (!tmp) { *out_len = 0; return NULL; }
-    size_t p = 0;
-    for (size_t i = 0; i < len; ++i) {
-        if (buf[i] == '\n' || buf[i] == '\r') continue;
-        tmp[p++] = buf[i];
+// Función para cargar un archivo de texto como buffer de bytes
+static bool cargar_archivo_texto(const char *ruta, unsigned char *&buffer, size_t &tamano) {
+    unsigned char **bloques = nullptr;
+    size_t *tamanios = nullptr;
+    size_t num_bloques = 0;
+    size_t total_bytes = 0;
+
+    if (!abrir_y_leer_en_bloques(ruta, &bloques, &tamanios, num_bloques, total_bytes)) {
+        return false;
     }
-    *out_len = p;
-    unsigned char* out = (unsigned char*) realloc(tmp, p ? p : 1);
-    if (out) return out;
-    return tmp;
-}
-static unsigned char* strip_spaces_copy_local(const unsigned char* buf, size_t len, size_t* out_len) {
-    unsigned char* tmp = (unsigned char*) malloc(len ? len : 1);
-    if (!tmp) { *out_len = 0; return NULL; }
-    size_t p = 0;
-    bool last_space = false;
-    for (size_t i = 0; i < len; ++i) {
-        unsigned char c = buf[i];
-        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
-            if (!last_space) { tmp[p++] = ' '; last_space = true; }
-        } else {
-            tmp[p++] = c;
-            last_space = false;
+
+    // Consolidar todos los bloques en un solo buffer
+    buffer = new unsigned char[total_bytes + 1];
+    if (!buffer) {
+        liberar_bloques(bloques, tamanios, num_bloques);
+        return false;
+    }
+
+    size_t offset = 0;
+    for (size_t i = 0; i < num_bloques; i++) {
+        for (size_t j = 0; j < tamanios[i]; j++) {
+            buffer[offset++] = bloques[i][j];
         }
     }
-    // trim
-    size_t start = 0; while (start < p && tmp[start] == ' ') start++;
-    size_t end = p; while (end > start && tmp[end-1] == ' ') end--;
-    size_t outp = (end > start) ? (end - start) : 0;
-    unsigned char* out = (unsigned char*) malloc(outp ? outp : 1);
-    if (!out) { free(tmp); *out_len = 0; return NULL; }
-    if (outp) memcpy(out, tmp + start, outp);
-    free(tmp);
-    *out_len = outp;
-    return out;
-}
+    buffer[total_bytes] = '\0';
+    tamano = total_bytes;
 
-// preview printer
-static void print_preview_local(const unsigned char* buf, size_t len, size_t maxbytes) {
-    size_t dump = len < maxbytes ? len : maxbytes;
-    for (size_t i = 0; i < dump; ++i) {
-        unsigned char c = buf[i];
-        if (c >= 32 && c <= 126) putchar(c);
-        else printf("\\x%02X", c);
-    }
-    if (len > dump) printf("...");
-    printf("\n");
-}
-
-// decide si una salida es "parcialmente imprimible"
-// strategy: examina primeros N bytes y cuenta imprimibles; devuelve true si >= threshold
-static bool is_partially_printable(const unsigned char* buf, size_t len, size_t check_bytes = 48, size_t threshold = 12) {
-    size_t n = (len < check_bytes) ? len : check_bytes;
-    size_t cnt = 0;
-    for (size_t i = 0; i < n; ++i) {
-        unsigned char c = buf[i];
-        if (c >= 32 && c <= 126) cnt++;
-    }
-    return cnt >= threshold;
-}
-
-// -----------------------------------------------------------------------------
-// ejecutar_fuerza_bruta: SOLO XOR (K=0..255).
-// Contrato: libera bloques (llama liberar_bloques al final).
-// -----------------------------------------------------------------------------
-extern "C" bool ejecutar_fuerza_bruta(unsigned char **bloques,
-                                      size_t *tamanios,
-                                      size_t num_bloques,
-                                      const unsigned char *pista_buf,
-                                      size_t pista_len,
-                                      int caso) {
-    if (!bloques || !tamanios || num_bloques == 0) return false;
-    if (!pista_buf || pista_len == 0) return false;
-
-    bool encontrado = false;
-    int intentos = 0;
-
-    // Solo XOR: no rotaciones
-    for (int K = 0; K <= 255 && !encontrado; ++K) {
-        ++intentos;
-        if ((intentos & 0x3FF) == 0) {
-            printf("Progreso (solo XOR): K=%d intentos=%d\n", K, intentos);
-            fflush(stdout);
-        }
-
-        // aplicar XOR
-        unsigned char **bloques_xor = desencriptar_xor(bloques, tamanios, num_bloques, (unsigned char)K);
-        if (!bloques_xor) continue;
-
-        // intentar descomprimir el resultado
-        size_t salida_len = 0;
-        char metodo_out[16] = {0};
-        unsigned char *salida = descomprimir_auto(bloques_xor, tamanios, num_bloques, salida_len, metodo_out);
-
-        // liberar bloques_xor (contrato con la función)
-        liberar_bloques_desencriptados(bloques_xor, num_bloques);
-
-        if (!salida || salida_len == 0) {
-            if (salida) free(salida);
-            continue;
-        }
-
-        // Si salida tiene parte imprimible, reportarlo (ayuda rápida)
-        if (is_partially_printable(salida, salida_len)) {
-            printf("[CANDIDATE] K=%03d metodo=%s preview: ", K, metodo_out);
-            print_preview_local(salida, salida_len, 120);
-        }
-
-        // Comparaciones: exacta
-        if (contains_sub_local(salida, salida_len, pista_buf, pista_len)) {
-            char outname[256];
-            snprintf(outname, sizeof(outname), "Resultado_Caso%d_SoloXOR_K%02X_%s_exact.txt", caso, K, metodo_out);
-            FILE *fo = fopen(outname, "wb");
-            if (fo) { fwrite(salida, 1, salida_len, fo); fclose(fo); }
-            printf("[ENCONTRADO exact] Caso %d -> Solo XOR K=0x%02X Metodo=%s Archivo=%s\n",
-                   caso, K, metodo_out, outname);
-            encontrado = true;
-        }
-        if (encontrado) {
-            // liberar salida (si descomprimir_auto usó malloc/free)
-            free(salida);
-            break;
-        }
-
-        // lowercase comparison
-        unsigned char *s_low = to_lower_copy_local(salida, salida_len);
-        unsigned char *p_low = to_lower_copy_local(pista_buf, pista_len);
-        if (s_low && p_low) {
-            if (contains_sub_local(s_low, salida_len, p_low, pista_len)) {
-                char outname[256];
-                snprintf(outname, sizeof(outname), "Resultado_Caso%d_SoloXOR_K%02X_%s_lower.txt", caso, K, metodo_out);
-                FILE *fo = fopen(outname, "wb");
-                if (fo) { fwrite(salida, 1, salida_len, fo); fclose(fo); }
-                printf("[ENCONTRADO lower] Caso %d -> Solo XOR K=0x%02X Metodo=%s Archivo=%s\n",
-                       caso, K, metodo_out, outname);
-                encontrado = true;
-            }
-        }
-        if (s_low) free(s_low);
-        if (p_low) free(p_low);
-        if (encontrado) { free(salida); break; }
-
-        // strip newlines
-        size_t s_sn_len = 0, p_sn_len = 0;
-        unsigned char *s_sn = strip_newlines_copy_local(salida, salida_len, &s_sn_len);
-        unsigned char *p_sn = strip_newlines_copy_local(pista_buf, pista_len, &p_sn_len);
-        if (s_sn && p_sn) {
-            if (contains_sub_local(s_sn, s_sn_len, p_sn, p_sn_len)) {
-                char outname[256];
-                snprintf(outname, sizeof(outname), "Resultado_Caso%d_SoloXOR_K%02X_%s_stripNL.txt", caso, K, metodo_out);
-                FILE *fo = fopen(outname, "wb");
-                if (fo) { fwrite(salida, 1, salida_len, fo); fclose(fo); }
-                printf("[ENCONTRADO stripNL] Caso %d -> Solo XOR K=0x%02X Metodo=%s Archivo=%s\n",
-                       caso, K, metodo_out, outname);
-                encontrado = true;
-            }
-        }
-        if (s_sn) free(s_sn);
-        if (p_sn) free(p_sn);
-        if (encontrado) { free(salida); break; }
-
-        // strip & collapse spaces
-        size_t s_sp_len = 0, p_sp_len = 0;
-        unsigned char *s_sp = strip_spaces_copy_local(salida, salida_len, &s_sp_len);
-        unsigned char *p_sp = strip_spaces_copy_local(pista_buf, pista_len, &p_sp_len);
-        if (s_sp && p_sp) {
-            if (contains_sub_local(s_sp, s_sp_len, p_sp, p_sp_len)) {
-                char outname[256];
-                snprintf(outname, sizeof(outname), "Resultado_Caso%d_SoloXOR_K%02X_%s_stripSpace.txt", caso, K, metodo_out);
-                FILE *fo = fopen(outname, "wb");
-                if (fo) { fwrite(salida, 1, salida_len, fo); fclose(fo); }
-                printf("[ENCONTRADO stripSpace] Caso %d -> Solo XOR K=0x%02X Metodo=%s Archivo=%s\n",
-                       caso, K, metodo_out, outname);
-                encontrado = true;
-            }
-        }
-        if (s_sp) free(s_sp);
-        if (p_sp) free(p_sp);
-        if (encontrado) { free(salida); break; }
-
-        // no match: liberar salida
-        free(salida);
-    } // for K
-
-    // liberar bloques originales (contrato)
     liberar_bloques(bloques, tamanios, num_bloques);
+    return true;
+}
 
-    printf("Fuerza bruta (Solo XOR) finalizada. intentos=%d encontrado=%d\n", intentos, encontrado ? 1 : 0);
-    return encontrado;
+// Función principal de fuerza bruta
+void fuerza_bruta() {
+    std::cout << "=== FUERZA BRUTA - PROBANDO TODAS LAS COMBINACIONES ===" << std::endl;
+
+    // Rutas de los archivos
+    const char *ruta_encriptado = "C:\\Users\\mat23\\OneDrive\\Documentos\\repositorio desafio uno\\Desaf-o-1---Inform-tica-2\\Code\\Code_Desafio1\\Encriptado1.txt";
+    const char *ruta_pista = "C:\\Users\\mat23\\OneDrive\\Documentos\\repositorio desafio uno\\Desaf-o-1---Inform-tica-2\\Code\\Code_Desafio1\\pista1.txt";
+
+    std::cout << "Archivo encriptado: " << ruta_encriptado << std::endl;
+    std::cout << "Archivo pista: " << ruta_pista << std::endl;
+
+    // Cargar archivo encriptado
+    unsigned char **bloques_encriptados = nullptr;
+    size_t *tamanios_encriptados = nullptr;
+    size_t num_bloques_encriptados = 0;
+    size_t total_bytes_encriptados = 0;
+
+    if (!abrir_y_leer_en_bloques(ruta_encriptado, &bloques_encriptados,
+                                 &tamanios_encriptados, num_bloques_encriptados,
+                                 total_bytes_encriptados)) {
+        std::cout << "Error: No se pudo cargar el archivo encriptado" << std::endl;
+        return;
+    }
+
+    // Cargar pista
+    unsigned char *pista_buffer = nullptr;
+    size_t pista_tamano = 0;
+    if (!cargar_archivo_texto(ruta_pista, pista_buffer, pista_tamano)) {
+        std::cout << "Error: No se pudo cargar la pista" << std::endl;
+        liberar_bloques(bloques_encriptados, tamanios_encriptados, num_bloques_encriptados);
+        return;
+    }
+
+    std::cout << "Tamaño archivo encriptado: " << total_bytes_encriptados << " bytes" << std::endl;
+    std::cout << "Tamaño pista: " << pista_tamano << " bytes" << std::endl;
+    std::cout << "Pista buscada: ";
+    for (size_t i = 0; i < pista_tamano; i++) {
+        std::cout << pista_buffer[i];
+    }
+    std::cout << std::endl;
+    std::cout << "Combinaciones a probar: " << (2 * 254 * 7 * 2) << std::endl;
+    std::cout << "==========================================" << std::endl;
+
+    int combinaciones_probadas = 0;
+    int combinaciones_exitosas = 0;
+
+    // Probar todas las combinaciones
+    for (int orden = 0; orden < 2; orden++) {
+        std::cout << "\n--- Probando orden: " << (orden == 0 ? "XOR->ROTACION" : "ROTACION->XOR") << " ---" << std::endl;
+
+        for (unsigned char clave_xor = 1; clave_xor < 255; clave_xor++) {
+            for (int rotacion = 1; rotacion < 8; rotacion++) {
+                for (int metodo_compresion = 0; metodo_compresion < 2; metodo_compresion++) {
+                    combinaciones_probadas++;
+
+                    if (combinaciones_probadas % 1000 == 0) {
+                        std::cout << "Probadas: " << combinaciones_probadas << " combinaciones..." << std::endl;
+                    }
+
+                    unsigned char **bloques_intermedios = nullptr;
+                    size_t salida_len = 0;
+                    unsigned char *resultado_descomprimido = nullptr;
+                    bool exito = false;
+
+                    try {
+                        // Aplicar desencriptación según el orden
+                        if (orden == 0) {
+                            // XOR primero, luego rotación
+                            bloques_intermedios = desencriptar_xor(bloques_encriptados,
+                                                                   tamanios_encriptados,
+                                                                   num_bloques_encriptados,
+                                                                   clave_xor);
+                            if (!bloques_intermedios) continue;
+
+                            unsigned char **bloques_desencriptados =
+                                desencriptar_rotacion(bloques_intermedios,
+                                                      tamanios_encriptados,
+                                                      num_bloques_encriptados,
+                                                      rotacion);
+                            liberar_bloques_desencriptados(bloques_intermedios, num_bloques_encriptados);
+
+                            if (!bloques_desencriptados) continue;
+
+                            // Aplicar descompresión
+                            if (metodo_compresion == 0) {
+                                resultado_descomprimido = descomprimir_RLE(bloques_desencriptados,
+                                                                           tamanios_encriptados,
+                                                                           num_bloques_encriptados,
+                                                                           salida_len);
+                            } else {
+                                resultado_descomprimido = descomprimir_LZ78(bloques_desencriptados,
+                                                                            tamanios_encriptados,
+                                                                            num_bloques_encriptados,
+                                                                            salida_len);
+                            }
+
+                            liberar_bloques_desencriptados(bloques_desencriptados, num_bloques_encriptados);
+
+                        } else {
+                            // Rotación primero, luego XOR
+                            bloques_intermedios = desencriptar_rotacion(bloques_encriptados,
+                                                                        tamanios_encriptados,
+                                                                        num_bloques_encriptados,
+                                                                        rotacion);
+                            if (!bloques_intermedios) continue;
+
+                            unsigned char **bloques_desencriptados =
+                                desencriptar_xor(bloques_intermedios,
+                                                 tamanios_encriptados,
+                                                 num_bloques_encriptados,
+                                                 clave_xor);
+                            liberar_bloques_desencriptados(bloques_intermedios, num_bloques_encriptados);
+
+                            if (!bloques_desencriptados) continue;
+
+                            // Aplicar descompresión
+                            if (metodo_compresion == 0) {
+                                resultado_descomprimido = descomprimir_RLE(bloques_desencriptados,
+                                                                           tamanios_encriptados,
+                                                                           num_bloques_encriptados,
+                                                                           salida_len);
+                            } else {
+                                resultado_descomprimido = descomprimir_LZ78(bloques_desencriptados,
+                                                                            tamanios_encriptados,
+                                                                            num_bloques_encriptados,
+                                                                            salida_len);
+                            }
+
+                            liberar_bloques_desencriptados(bloques_desencriptados, num_bloques_encriptados);
+                        }
+
+                        // Verificar si la descompresión fue exitosa
+                        if (resultado_descomprimido && salida_len > 0) {
+                            // Verificar si contiene la pista
+                            bool contiene = contiene_pista(resultado_descomprimido, salida_len,
+                                                           pista_buffer, pista_tamano);
+
+                            if (contiene) {
+                                combinaciones_exitosas++;
+                                std::cout << "\n*** COMBINACION EXITOSA #" << combinaciones_exitosas << " ***" << std::endl;
+                                std::cout << "Orden: " << (orden == 0 ? "XOR->ROTACION" : "ROTACION->XOR") << std::endl;
+                                std::cout << "Clave XOR: " << (int)clave_xor << std::endl;
+                                std::cout << "Rotacion: " << rotacion << " bits" << std::endl;
+                                std::cout << "Compresion: " << (metodo_compresion == 0 ? "RLE" : "LZ78") << std::endl;
+                                std::cout << "Tamaño: " << salida_len << " bytes" << std::endl;
+
+                                // Mostrar primeros caracteres del resultado
+                                std::cout << "Primeros 100 caracteres: ";
+                                for (size_t i = 0; i < salida_len && i < 100; i++) {
+                                    std::cout << resultado_descomprimido[i];
+                                }
+                                std::cout << std::endl;
+
+                                // Guardar resultado en archivo
+                                char nombre_archivo[100];
+                                snprintf(nombre_archivo, sizeof(nombre_archivo),
+                                         "resultado_%d_%d_%d_%s.txt",
+                                         orden, (int)clave_xor, rotacion,
+                                         metodo_compresion == 0 ? "RLE" : "LZ78");
+
+                                FILE *archivo = fopen(nombre_archivo, "wb");
+                                if (archivo) {
+                                    fwrite(resultado_descomprimido, 1, salida_len, archivo);
+                                    fclose(archivo);
+                                    std::cout << "Guardado en: " << nombre_archivo << std::endl;
+                                }
+
+                                std::cout << "------------------------------------------" << std::endl;
+                                exito = true;
+                            }
+
+                            // Mostrar TODAS las combinaciones
+                            std::cout << "Combinacion " << combinaciones_probadas << ": ";
+                            std::cout << "Orden=" << (orden == 0 ? "XOR->ROT" : "ROT->XOR");
+                            std::cout << ", XOR=" << (int)clave_xor;
+                            std::cout << ", Rot=" << rotacion;
+                            std::cout << ", Comp=" << (metodo_compresion == 0 ? "RLE" : "LZ78");
+                            std::cout << ", Tamaño=" << salida_len;
+                            std::cout << ", Pista=" << (contiene ? "SI" : "NO");
+                            std::cout << std::endl;
+
+                            if (!exito && salida_len > 0) {
+                                std::cout << "  Preview: ";
+                                for (size_t i = 0; i < salida_len && i < 30; i++) {
+                                    if (resultado_descomprimido[i] >= 32 && resultado_descomprimido[i] <= 126) {
+                                        std::cout << resultado_descomprimido[i];
+                                    } else {
+                                        std::cout << "?";
+                                    }
+                                }
+                                std::cout << std::endl;
+                            }
+                        }
+
+                        if (resultado_descomprimido) {
+                            delete[] resultado_descomprimido;
+                        }
+
+                    } catch (...) {
+                        if (bloques_intermedios) {
+                            liberar_bloques_desencriptados(bloques_intermedios, num_bloques_encriptados);
+                        }
+                        if (resultado_descomprimido) {
+                            delete[] resultado_descomprimido;
+                        }
+
+                        std::cout << "Combinacion " << combinaciones_probadas << ": ERROR en procesamiento" << std::endl;
+                    }
+                }
+            }
+        }
+    }
+
+    std::cout << "\n==========================================" << std::endl;
+    std::cout << "=== RESULTADOS FINALES ===" << std::endl;
+    std::cout << "Combinaciones probadas: " << combinaciones_probadas << std::endl;
+    std::cout << "Combinaciones exitosas: " << combinaciones_exitosas << std::endl;
+    std::cout << "==========================================" << std::endl;
+
+    // Limpieza final
+    delete[] pista_buffer;
+    liberar_bloques(bloques_encriptados, tamanios_encriptados, num_bloques_encriptados);
 }
 
 

@@ -107,3 +107,4 @@ void liberar_bloques(unsigned char **bloques, size_t *tamanios, size_t num_bloqu
     }
     if (tamanios) delete[] tamanios;
 }
+

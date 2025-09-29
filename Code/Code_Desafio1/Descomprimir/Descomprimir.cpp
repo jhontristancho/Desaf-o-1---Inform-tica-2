@@ -1,26 +1,24 @@
-#include <iostream>
-#include <cstring>
-#include <stddef.h>   // size_t
-const size_t OUT_BUF_INICIAL = 8192UL;
+// Descomprimir_fixed.cpp
+// Versión corregida y robusta de los métodos de descompresión RLE y LZ78
+// - Se eliminó texto accidental/erróneo al inicio del archivo.
+// - Se mejoraron comprobaciones de errores y limpieza de memoria.
+// - Se usa memcpy donde corresponde para copiar buffers grandes.
+
+#include <cstddef> // size_t
+#include <new>     // std::nothrow
+#include <limits>  // para tamaños máximos
+#include <cstring> // memcpy
+
+// --- constantes ---
+const size_t OUT_BUF_INICIAL = 8192UL;            // 8 KiB inicial
 const size_t MAX_SALIDA = 300UL * 1024UL * 1024UL; // 300 MiB
-const size_t DICT_CAP_INICIAL = 256UL;
-const size_t TAM_MAX = (size_t)(-1);          // valores maximos
+const size_t DICT_CAP_INICIAL = 256UL;            // diccionario LZ78 inicial
+const size_t TAM_MAX = (size_t)(-1);              // máximo representable
 const unsigned long MAX_ULONG = (unsigned long)(-1);
 
+// --- helpers ---
 static bool es_espacio(unsigned char c) {
-    return (c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\v' || c == '\f');
-}
-
-
-static void asignar_metodo(char metodo_out[16], const char *s) {
-    if (!metodo_out) return;
-    int i = 0;
-    while (i < 15 && s[i] != '\0') {
-        metodo_out[i] = s[i];
-        ++i;
-    }
-    // completar con ceros
-    for (int j = i; j < 16; ++j) metodo_out[j] = 0;
+    return c == ' ' || c == '\n' || c == '\r' || c == '\t' || c == '\v' || c == '\f';
 }
 
 static bool obtener_byte_con_cursor(unsigned char **bloques,
@@ -44,9 +42,10 @@ static bool retroceder_un_byte(unsigned char ** /*bloques*/,
                                size_t num_bloques,
                                size_t &idx_bloque,
                                size_t &offset) {
-    if (idx_bloque >= num_bloques && num_bloques > 0) {
+    if (num_bloques == 0) return false;
+    if (idx_bloque >= num_bloques) {
         idx_bloque = num_bloques - 1;
-        offset = (tamanios[idx_bloque] == 0) ? 0 : tamanios[idx_bloque];
+        offset = tamanios[idx_bloque];
     }
     if (idx_bloque == 0 && offset == 0) return false;
     if (offset > 0) {
@@ -59,32 +58,36 @@ static bool retroceder_un_byte(unsigned char ** /*bloques*/,
         return true;
     }
 }
+
 static unsigned char* crear_buffer(size_t capacidad) {
     if (capacidad == 0) capacidad = 1;
-    unsigned char *p = new unsigned char[capacidad];
+    unsigned char *p = new (std::nothrow) unsigned char[capacidad];
     return p;
 }
+
 static bool asegurar_capacidad(unsigned char *&buf, size_t &cap, size_t requerido) {
     if (requerido <= cap) return true;
     size_t nueva = (cap == 0) ? 1 : cap;
-    // doblar cuidando overflow sin usar SIZE_MAX macro
     while (nueva < requerido) {
-        if (nueva > (TAM_MAX / 2)) { // evitar overflow
+        if (nueva > (TAM_MAX / 2)) {
             nueva = requerido;
             break;
         } else {
             nueva *= 2;
         }
     }
-    unsigned char *nuevo = new unsigned char[nueva];
+    unsigned char *nuevo = new (std::nothrow) unsigned char[nueva];
     if (!nuevo) return false;
-    for (size_t i = 0; i < cap; ++i) nuevo[i] = buf[i];
+    if (cap > 0 && buf) memcpy(nuevo, buf, cap);
     delete[] buf;
     buf = nuevo;
     cap = nueva;
     return true;
 }
 
+// -------------------- DESCOMPRIMIR RLE --------------------
+// Formato textual esperado: <digitos><car><digitos><car>...
+// Ejemplo: "4A3B2C" -> AAAABBBCC
 unsigned char* descomprimir_RLE(unsigned char **bloques,
                                 size_t *tamanios,
                                 size_t num_bloques,
@@ -92,7 +95,8 @@ unsigned char* descomprimir_RLE(unsigned char **bloques,
     salida_len_out = 0;
     if (!bloques || !tamanios || num_bloques == 0) return nullptr;
 
-    size_t idx = 0, off = 0;
+    size_t idx = 0;
+    size_t off = 0;
     unsigned char *outbuf = crear_buffer(OUT_BUF_INICIAL);
     if (!outbuf) return nullptr;
     size_t cap_out = OUT_BUF_INICIAL;
@@ -100,12 +104,13 @@ unsigned char* descomprimir_RLE(unsigned char **bloques,
 
     unsigned long acc = 0;
     bool leyendo_num = false;
-    bool any_read = false;
+    bool any_leido = false;
     unsigned char b;
 
     while (true) {
-        if (!obtener_byte_con_cursor(bloques, tamanios, num_bloques, idx, off, b)) break;
-        any_read = true;
+        bool ok = obtener_byte_con_cursor(bloques, tamanios, num_bloques, idx, off, b);
+        if (!ok) break;
+        any_leido = true;
         if (b >= '0' && b <= '9') {
             leyendo_num = true;
             if (acc > (MAX_ULONG / 10UL)) { delete[] outbuf; return nullptr; }
@@ -124,13 +129,15 @@ unsigned char* descomprimir_RLE(unsigned char **bloques,
         }
     }
 
-    if (!any_read) { delete[] outbuf; return nullptr; }
-    if (leyendo_num) { delete[] outbuf; return nullptr; } // número sin símbolo
+    if (!any_leido) { delete[] outbuf; return nullptr; }
+    if (leyendo_num) { delete[] outbuf; return nullptr; }
 
     salida_len_out = out_len;
     return outbuf;
 }
 
+// -------------------- DESCOMPRIMIR LZ78 --------------------
+// Formato asumido: <indice> <car> con whitespace permitidos entre tokens.
 unsigned char* descomprimir_LZ78(unsigned char **bloques,
                                  size_t *tamanios,
                                  size_t num_bloques,
@@ -139,8 +146,8 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
     if (!bloques || !tamanios || num_bloques == 0) return nullptr;
 
     size_t dict_cap = DICT_CAP_INICIAL;
-    unsigned char **dict = new unsigned char*[dict_cap];
-    size_t *dict_lens = new size_t[dict_cap];
+    unsigned char **dict = new (std::nothrow) unsigned char*[dict_cap];
+    size_t *dict_lens = new (std::nothrow) size_t[dict_cap];
     if (!dict || !dict_lens) {
         if (dict) delete[] dict;
         if (dict_lens) delete[] dict_lens;
@@ -158,6 +165,7 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
     bool any_token = false;
 
     while (true) {
+        // saltar whitespace
         while (true) {
             if (!obtener_byte_con_cursor(bloques, tamanios, num_bloques, idx, off, ch)) break;
             if (!es_espacio(ch)) {
@@ -191,12 +199,10 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
                 break;
             }
         }
-
-        if (!any_digit) {
-            break;
-        }
+        if (!any_digit) break; // EOF limpio, terminamos
         unsigned long index = acc;
 
+        // leer siguiente non-whitespace como caracter
         bool found_char = false;
         while (true) {
             if (!obtener_byte_con_cursor(bloques, tamanios, num_bloques, idx, off, ch)) {
@@ -215,11 +221,12 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
         any_token = true;
         unsigned char car = ch;
 
+        // construir nueva entrada
         unsigned char *nueva = nullptr;
         size_t nueva_len = 0;
         if (index == 0) {
             nueva_len = 1;
-            nueva = new unsigned char[1];
+            nueva = new (std::nothrow) unsigned char[1];
             if (!nueva) {
                 for (size_t i = 0; i < dict_size; ++i) delete[] dict[i];
                 delete[] dict; delete[] dict_lens; delete[] outbuf;
@@ -234,16 +241,17 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
             }
             size_t pref_len = dict_lens[index - 1];
             nueva_len = pref_len + 1;
-            nueva = new unsigned char[nueva_len];
+            nueva = new (std::nothrow) unsigned char[nueva_len];
             if (!nueva) {
                 for (size_t i = 0; i < dict_size; ++i) delete[] dict[i];
                 delete[] dict; delete[] dict_lens; delete[] outbuf;
                 return nullptr;
             }
-            for (size_t k = 0; k < pref_len; ++k) nueva[k] = dict[index - 1][k];
+            if (pref_len > 0) memcpy(nueva, dict[index - 1], pref_len);
             nueva[pref_len] = car;
         }
 
+        // anexar nueva a salida
         if (out_len + nueva_len > MAX_SALIDA) {
             delete[] nueva;
             for (size_t i = 0; i < dict_size; ++i) delete[] dict[i];
@@ -256,7 +264,7 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
             delete[] dict; delete[] dict_lens; delete[] outbuf;
             return nullptr;
         }
-        for (size_t k = 0; k < nueva_len; ++k) outbuf[out_len + k] = nueva[k];
+        memcpy(outbuf + out_len, nueva, nueva_len);
         out_len += nueva_len;
 
         // añadir al diccionario
@@ -268,8 +276,8 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
                 delete[] dict; delete[] dict_lens; delete[] outbuf;
                 return nullptr;
             }
-            unsigned char **nd = new unsigned char*[nueva_cap];
-            size_t *nl = new size_t[nueva_cap];
+            unsigned char **nd = new (std::nothrow) unsigned char*[nueva_cap];
+            size_t *nl = new (std::nothrow) size_t[nueva_cap];
             if (!nd || !nl) {
                 delete[] nueva;
                 if (nd) delete[] nd;
@@ -285,7 +293,7 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
         dict[dict_size] = nueva;
         dict_lens[dict_size] = nueva_len;
         ++dict_size;
-    } // fin loop
+    }
 
     if (!any_token) {
         delete[] outbuf;
@@ -300,30 +308,4 @@ unsigned char* descomprimir_LZ78(unsigned char **bloques,
     return outbuf;
 }
 
-// ------------------ descomprimir_auto ------------------
 
-unsigned char* descomprimir_auto(unsigned char **bloques,
-                                 size_t *tamanios,
-                                 size_t num_bloques,
-                                 size_t &salida_len,
-                                 char metodo_out[16]) {
-    salida_len = 0;
-    if (metodo_out) {
-        for (int i = 0; i < 16; ++i) metodo_out[i] = 0;
-    }
-
-    unsigned char *res_rle = descomprimir_RLE(bloques, tamanios, num_bloques, salida_len);
-    if (res_rle) {
-        if (metodo_out) asignar_metodo(metodo_out, "RLE");
-        return res_rle;
-    }
-
-    unsigned char *res_lz = descomprimir_LZ78(bloques, tamanios, num_bloques, salida_len);
-    if (res_lz) {
-        if (metodo_out) asignar_metodo(metodo_out, "LZ78");
-        return res_lz;
-    }
-
-    if (metodo_out) asignar_metodo(metodo_out, "NINGUNO");
-    return nullptr;
-}
